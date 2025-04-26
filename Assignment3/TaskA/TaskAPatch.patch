@@ -1,0 +1,127 @@
+From b5a43c899c987adb2d0288f3ae1fea5201e2dce7 Mon Sep 17 00:00:00 2001
+From: Adarsh Gupta <study.adarshgupta@gmail.com>
+Date: Mon, 14 Oct 2024 13:49:47 +0000
+Subject: [PATCH 1/2] Makefile (Latest Ubuntu Fix)
+
+---
+ Makefile | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/Makefile b/Makefile
+index 09d790cf..087956d4 100644
+--- a/Makefile
++++ b/Makefile
+@@ -76,7 +76,7 @@ AS = $(TOOLPREFIX)gas
+ LD = $(TOOLPREFIX)ld
+ OBJCOPY = $(TOOLPREFIX)objcopy
+ OBJDUMP = $(TOOLPREFIX)objdump
+-CFLAGS = -fno-pic -static -fno-builtin -fno-strict-aliasing -O2 -Wall -MD -ggdb -m32 -Werror -fno-omit-frame-pointer
++CFLAGS = -fno-pic -static -fno-builtin -fno-strict-aliasing -O2 -Wall -MD -ggdb -m32 -fno-omit-frame-pointer
+ CFLAGS += $(shell $(CC) -fno-stack-protector -E -x c /dev/null >/dev/null 2>&1 && echo -fno-stack-protector)
+ ASFLAGS = -m32 -gdwarf-2 -Wa,-divide
+ # FreeBSD ld wants ``elf_i386_fbsd''
+-- 
+2.43.0
+
+
+From 0e744c14a92d73540a1066308177329d2ef46dc3 Mon Sep 17 00:00:00 2001
+From: Adarsh Gupta <study.adarshgupta@gmail.com>
+Date: Mon, 14 Oct 2024 13:50:08 +0000
+Subject: [PATCH 2/2] Lazy Memory Allocation
+
+---
+ sysproc.c |  8 ++++++--
+ trap.c    | 31 +++++++++++++++++++++++++++++++
+ vm.c      |  3 ++-
+ 3 files changed, 39 insertions(+), 3 deletions(-)
+
+diff --git a/sysproc.c b/sysproc.c
+index 0686d295..fa1fcb66 100644
+--- a/sysproc.c
++++ b/sysproc.c
+@@ -51,8 +51,12 @@ sys_sbrk(void)
+   if(argint(0, &n) < 0)
+     return -1;
+   addr = myproc()->sz;
+-  if(growproc(n) < 0)
+-    return -1;
++
++  // Giving false sense of memory allocation to process
++  myproc()->sz = myproc()->sz + n;
++
++  // if(growproc(n) < 0)
++  //   return -1;
+   return addr;
+ }
+ 
+diff --git a/trap.c b/trap.c
+index 41c66ebf..b3b3660e 100644
+--- a/trap.c
++++ b/trap.c
+@@ -32,6 +32,10 @@ idtinit(void)
+   lidt(idt, sizeof(idt));
+ }
+ 
++// To handle lazy memory allocation
++int lazyAllocate();
++int mappages(pde_t *pgdir, void *va, uint size, uint pa, int perm);
++
+ //PAGEBREAK: 41
+ void
+ trap(struct trapframe *tf)
+@@ -47,6 +51,12 @@ trap(struct trapframe *tf)
+   }
+ 
+   switch(tf->trapno){
++  case T_PGFLT:
++    // handling page fault by lazy memory allocation
++    if(lazyAllocate() < 0){
++      cprintf("Failed to lazily allocate memory.\n");
++      panic("memory");
++    }
+   case T_IRQ0 + IRQ_TIMER:
+     if(cpuid() == 0){
+       acquire(&tickslock);
+@@ -110,3 +120,24 @@ trap(struct trapframe *tf)
+   if(myproc() && myproc()->killed && (tf->cs&3) == DPL_USER)
+     exit();
+ }
++
++int lazyAllocate(){
++  // Get page fault address
++  int addr=rcr2();
++
++  // Get page address using PGROUNDDOWN address
++  int rounded_addr = PGROUNDDOWN(addr);
++
++  // Try to allocate a page
++  char *mem=kalloc();
++  if(mem!=0){
++    // If memory allocation succedded, set it to 0
++    memset(mem, 0, PGSIZE);
++    // Add mapping in the processes page table
++    if(mappages(myproc()->pgdir, (char*)rounded_addr, PGSIZE, V2P(mem), PTE_W|PTE_U) >= 0)
++      // Successful allocation and mapping
++      return 0;
++  } 
++  
++  return -1;
++}
+\ No newline at end of file
+diff --git a/vm.c b/vm.c
+index 7134cfff..76ea5ad1 100644
+--- a/vm.c
++++ b/vm.c
+@@ -57,7 +57,8 @@ walkpgdir(pde_t *pgdir, const void *va, int alloc)
+ // Create PTEs for virtual addresses starting at va that refer to
+ // physical addresses starting at pa. va and size might not
+ // be page-aligned.
+-static int
++// Making static int --> int for lazy memory allocation
++int
+ mappages(pde_t *pgdir, void *va, uint size, uint pa, int perm)
+ {
+   char *a, *last;
+-- 
+2.43.0
+
