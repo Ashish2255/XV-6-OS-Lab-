@@ -1,0 +1,1635 @@
+From ed8bde9e4bccbc21e1ab453ca005ed3d988ce7a6 Mon Sep 17 00:00:00 2001
+From: Adarsh Gupta <iamadarshgupta8@gmail.com>
+Date: Tue, 24 Sep 2024 12:00:55 +0530
+Subject: [PATCH 1/4] Working 1, 2
+
+---
+ .vscode/settings.json |  6 ++++++
+ Makefile              |  3 ++-
+ defs.h                |  2 ++
+ proc.c                | 24 ++++++++++++++++++++++++
+ proc.h                | 10 ++++++++++
+ processlist.c         | 16 ++++++++++++++++
+ syscall.c             |  4 ++++
+ syscall.h             |  2 ++
+ sysproc.c             | 26 ++++++++++++++++++++++++++
+ user.h                |  3 +++
+ usys.S                |  2 ++
+ 11 files changed, 97 insertions(+), 1 deletion(-)
+ create mode 100644 .vscode/settings.json
+ create mode 100644 processlist.c
+
+diff --git a/.vscode/settings.json b/.vscode/settings.json
+new file mode 100644
+index 0000000..a68cc3b
+--- /dev/null
++++ b/.vscode/settings.json
+@@ -0,0 +1,6 @@
++{
++    "files.associations": {
++        "types.h": "c",
++        "defs.h": "c"
++    }
++}
+\ No newline at end of file
+diff --git a/Makefile b/Makefile
+index 09d790c..53039bf 100644
+--- a/Makefile
++++ b/Makefile
+@@ -181,6 +181,7 @@ UPROGS=\
+ 	_usertests\
+ 	_wc\
+ 	_zombie\
++	_processlist\
+ 
+ fs.img: mkfs README $(UPROGS)
+ 	./mkfs fs.img README $(UPROGS)
+@@ -250,7 +251,7 @@ qemu-nox-gdb: fs.img xv6.img .gdbinit
+ EXTRA=\
+ 	mkfs.c ulib.c user.h cat.c echo.c forktest.c grep.c kill.c\
+ 	ln.c ls.c mkdir.c rm.c stressfs.c usertests.c wc.c zombie.c\
+-	printf.c umalloc.c\
++	printf.c umalloc.c processlist.c\
+ 	README dot-bochsrc *.pl toc.* runoff runoff1 runoff.list\
+ 	.gdbinit.tmpl gdbutil\
+ 
+diff --git a/defs.h b/defs.h
+index 82fb982..9775118 100644
+--- a/defs.h
++++ b/defs.h
+@@ -9,6 +9,7 @@ struct spinlock;
+ struct sleeplock;
+ struct stat;
+ struct superblock;
++struct processes_info;
+ 
+ // bio.c
+ void            binit(void);
+@@ -120,6 +121,7 @@ void            userinit(void);
+ int             wait(void);
+ void            wakeup(void*);
+ void            yield(void);
++int             populate_processes_info(struct processes_info*);
+ 
+ // swtch.S
+ void            swtch(struct context**, struct context*);
+diff --git a/proc.c b/proc.c
+index 806b1b1..4a20b1e 100644
+--- a/proc.c
++++ b/proc.c
+@@ -199,6 +199,8 @@ fork(void)
+   np->sz = curproc->sz;
+   np->parent = curproc;
+   *np->tf = *curproc->tf;
++  np->tickets = 10;
++  np->ticks = 0;
+ 
+   // Clear %eax so that fork returns 0 in the child.
+   np->tf->eax = 0;
+@@ -342,6 +344,7 @@ scheduler(void)
+       c->proc = p;
+       switchuvm(p);
+       p->state = RUNNING;
++      p->ticks++;
+ 
+       swtch(&(c->scheduler), p->context);
+       switchkvm();
+@@ -532,3 +535,24 @@ procdump(void)
+     cprintf("\n");
+   }
+ }
++
++
++int populate_processes_info(struct processes_info* processes_info){
++  acquire(&ptable.lock);
++  struct proc* p;
++  int proc_count = 0;
++
++  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
++    if(p->state == UNUSED)
++      continue;
++
++    processes_info->pids[proc_count] = p->pid;
++    processes_info->ticks[proc_count] = p->ticks;
++    processes_info->tickets[proc_count] = p->tickets;
++
++    proc_count++;
++  }
++  processes_info->num_processes = proc_count;
++  release(&ptable.lock);
++  return 1;
++}
+\ No newline at end of file
+diff --git a/proc.h b/proc.h
+index 1647114..85c093b 100644
+--- a/proc.h
++++ b/proc.h
+@@ -49,6 +49,16 @@ struct proc {
+   struct file *ofile[NOFILE];  // Open files
+   struct inode *cwd;           // Current directory
+   char name[16];               // Process name (debugging)
++  int tickets;                 // Number of tickets for lottery sheduling
++  int ticks;                   // Number of times process is scheduled
++};
++
++// Required for lottery scheduling
++struct processes_info{
++  int num_processes;           // Number of non-UNUSED processes
++  int pids[NPROC];             // pids of  non-UNUSED processes
++  int ticks[NPROC];            // number of ticks a process is scheduled
++  int tickets[NPROC];          // number of tickets set by settickets()
+ };
+ 
+ // Process memory is laid out contiguously, low addresses first:
+diff --git a/processlist.c b/processlist.c
+new file mode 100644
+index 0000000..0c13e24
+--- /dev/null
++++ b/processlist.c
+@@ -0,0 +1,16 @@
++#include "types.h"
++#include "mmu.h"
++#include "param.h"
++#include "proc.h"
++#include "user.h"
++int main(int argc, char *argv[])
++{
++    struct processes_info info;
++    getprocessesinfo(&info);
++    printf(1, "%d running processes\n", info.num_processes);
++    printf(1, "PID\tTICKETS\tTICKS\n");
++    for (int i = 0; i < info.num_processes; ++i) {
++        printf(1, "%d\t%d\t%d\n", info.pids[i], info.tickets[i], info.ticks[i]);
++    }
++    exit();
++}
+diff --git a/syscall.c b/syscall.c
+index ee85261..dc26801 100644
+--- a/syscall.c
++++ b/syscall.c
+@@ -103,6 +103,8 @@ extern int sys_unlink(void);
+ extern int sys_wait(void);
+ extern int sys_write(void);
+ extern int sys_uptime(void);
++extern int sys_settickets(void);
++extern int sys_getprocessesinfo(void);
+ 
+ static int (*syscalls[])(void) = {
+ [SYS_fork]    sys_fork,
+@@ -126,6 +128,8 @@ static int (*syscalls[])(void) = {
+ [SYS_link]    sys_link,
+ [SYS_mkdir]   sys_mkdir,
+ [SYS_close]   sys_close,
++[SYS_settickets] sys_settickets,
++[SYS_getprocessesinfo] sys_getprocessesinfo,
+ };
+ 
+ void
+diff --git a/syscall.h b/syscall.h
+index bc5f356..85c3924 100644
+--- a/syscall.h
++++ b/syscall.h
+@@ -20,3 +20,5 @@
+ #define SYS_link   19
+ #define SYS_mkdir  20
+ #define SYS_close  21
++#define SYS_settickets 22
++#define SYS_getprocessesinfo 23
+\ No newline at end of file
+diff --git a/sysproc.c b/sysproc.c
+index 0686d29..a2cdd67 100644
+--- a/sysproc.c
++++ b/sysproc.c
+@@ -89,3 +89,29 @@ sys_uptime(void)
+   release(&tickslock);
+   return xticks;
+ }
++
++int
++sys_settickets(void)
++{
++  int numtickets;
++  
++  // Getting integer argument: number of tickets
++  int resp0 = argint(0, &numtickets);
++  if(resp0 < 0) return -1;
++
++  // Setting number of tickets for current process
++  myproc()->tickets = numtickets;
++  return numtickets;
++}
++
++int
++sys_getprocessesinfo(void)
++{
++  void *processInfoPtr;
++  
++  int resp0 = argptr(0, (void*)&processInfoPtr, sizeof(processInfoPtr));
++  if(resp0 < 0) return -1;
++
++  int resp = populate_processes_info((struct processes_info*) processInfoPtr);
++  return resp;
++}
+\ No newline at end of file
+diff --git a/user.h b/user.h
+index 4f99c52..1a605fd 100644
+--- a/user.h
++++ b/user.h
+@@ -1,5 +1,6 @@
+ struct stat;
+ struct rtcdate;
++struct processes_info;
+ 
+ // system calls
+ int fork(void);
+@@ -23,6 +24,8 @@ int getpid(void);
+ char* sbrk(int);
+ int sleep(int);
+ int uptime(void);
++int settickets(int);
++int getprocessesinfo(struct processes_info*);
+ 
+ // ulib.c
+ int stat(const char*, struct stat*);
+diff --git a/usys.S b/usys.S
+index 8bfd8a1..eeb8bcf 100644
+--- a/usys.S
++++ b/usys.S
+@@ -29,3 +29,5 @@ SYSCALL(getpid)
+ SYSCALL(sbrk)
+ SYSCALL(sleep)
+ SYSCALL(uptime)
++SYSCALL(settickets)
++SYSCALL(getprocessesinfo)
+\ No newline at end of file
+-- 
+2.34.1
+
+
+From 12ded3f89725255cd8f7841941502dfd5ed86544 Mon Sep 17 00:00:00 2001
+From: Adarsh Gupta <iamadarshgupta8@gmail.com>
+Date: Tue, 24 Sep 2024 12:26:34 +0530
+Subject: [PATCH 2/4] timewithtickets working
+
+---
+ .vscode/settings.json |   6 +-
+ Makefile              |   3 +-
+ syscall.c             |   2 +
+ syscall.h             |   3 +-
+ sysproc.c             |   7 +++
+ timewithtickets.c     | 132 ++++++++++++++++++++++++++++++++++++++++++
+ user.h                |   1 +
+ usys.S                |   3 +-
+ 8 files changed, 153 insertions(+), 4 deletions(-)
+ create mode 100644 timewithtickets.c
+
+diff --git a/.vscode/settings.json b/.vscode/settings.json
+index a68cc3b..fbf610b 100644
+--- a/.vscode/settings.json
++++ b/.vscode/settings.json
+@@ -1,6 +1,10 @@
+ {
+     "files.associations": {
+         "types.h": "c",
+-        "defs.h": "c"
++        "defs.h": "c",
++        "proc.h": "c",
++        "user.h": "c",
++        "mmu.h": "c",
++        "param.h": "c"
+     }
+ }
+\ No newline at end of file
+diff --git a/Makefile b/Makefile
+index 53039bf..fd52be5 100644
+--- a/Makefile
++++ b/Makefile
+@@ -182,6 +182,7 @@ UPROGS=\
+ 	_wc\
+ 	_zombie\
+ 	_processlist\
++	_timewithtickets\
+ 
+ fs.img: mkfs README $(UPROGS)
+ 	./mkfs fs.img README $(UPROGS)
+@@ -251,7 +252,7 @@ qemu-nox-gdb: fs.img xv6.img .gdbinit
+ EXTRA=\
+ 	mkfs.c ulib.c user.h cat.c echo.c forktest.c grep.c kill.c\
+ 	ln.c ls.c mkdir.c rm.c stressfs.c usertests.c wc.c zombie.c\
+-	printf.c umalloc.c processlist.c\
++	printf.c umalloc.c processlist.c timewithtickets.c\
+ 	README dot-bochsrc *.pl toc.* runoff runoff1 runoff.list\
+ 	.gdbinit.tmpl gdbutil\
+ 
+diff --git a/syscall.c b/syscall.c
+index dc26801..52009a0 100644
+--- a/syscall.c
++++ b/syscall.c
+@@ -105,6 +105,7 @@ extern int sys_write(void);
+ extern int sys_uptime(void);
+ extern int sys_settickets(void);
+ extern int sys_getprocessesinfo(void);
++extern int sys_yield(void);
+ 
+ static int (*syscalls[])(void) = {
+ [SYS_fork]    sys_fork,
+@@ -130,6 +131,7 @@ static int (*syscalls[])(void) = {
+ [SYS_close]   sys_close,
+ [SYS_settickets] sys_settickets,
+ [SYS_getprocessesinfo] sys_getprocessesinfo,
++[SYS_yield] sys_yield,
+ };
+ 
+ void
+diff --git a/syscall.h b/syscall.h
+index 85c3924..db6c4ba 100644
+--- a/syscall.h
++++ b/syscall.h
+@@ -21,4 +21,5 @@
+ #define SYS_mkdir  20
+ #define SYS_close  21
+ #define SYS_settickets 22
+-#define SYS_getprocessesinfo 23
+\ No newline at end of file
++#define SYS_getprocessesinfo 23
++#define SYS_yield 24
+\ No newline at end of file
+diff --git a/sysproc.c b/sysproc.c
+index a2cdd67..867c1e4 100644
+--- a/sysproc.c
++++ b/sysproc.c
+@@ -114,4 +114,11 @@ sys_getprocessesinfo(void)
+ 
+   int resp = populate_processes_info((struct processes_info*) processInfoPtr);
+   return resp;
++}
++
++int
++sys_yield(void)
++{
++  yield();
++  return 1;
+ }
+\ No newline at end of file
+diff --git a/timewithtickets.c b/timewithtickets.c
+new file mode 100644
+index 0000000..635078d
+--- /dev/null
++++ b/timewithtickets.c
+@@ -0,0 +1,132 @@
++#include "types.h"
++#include "mmu.h"
++#include "param.h"
++#include "proc.h"
++#include "user.h"
++
++#undef USE_YIELD
++#define MAX_CHILDREN 32
++#define LARGE_TICKET_COUNT 100000
++#define MAX_YIELDS_FOR_SETUP 100
++
++__attribute__((noreturn))
++void yield_forever() {
++    while (1) {
++        yield();
++    }
++}
++
++__attribute__((noreturn))
++void run_forever() {
++    while (1) {
++        __asm__("");
++    }
++}
++
++int spawn(int tickets) {
++    int pid = fork();
++    if (pid == 0) {
++        settickets(tickets);
++        yield();
++#ifdef USE_YIELD
++        yield_forever();
++#else
++        run_forever();
++#endif
++    } else if (pid != -1) {
++        return pid;
++    } else {
++        printf(2, "error in fork\n");
++        return -1;
++    }
++}
++
++int find_index_of_pid(int *list, int list_size, int pid) {
++    for (int i = 0; i < list_size; ++i) {
++        if (list[i] == pid)
++            return i;
++    }
++    return -1;
++}
++
++void wait_for_ticket_counts(int num_children, int *pids, int *tickets) {
++    for (int yield_count = 0; yield_count < MAX_YIELDS_FOR_SETUP; ++yield_count) {
++        yield();
++        int done = 1;
++        struct processes_info info;
++        getprocessesinfo(&info);
++        for (int i = 0; i < num_children; ++i) {
++            int index = find_index_of_pid(info.pids, info.num_processes, pids[i]);
++            if (info.tickets[index] != tickets[i]) done = 0;
++        }
++        if (done)
++            break;
++    }
++}
++
++int main(int argc, char *argv[])
++{
++    if (argc < 3) {
++        printf(2, "usage: %s seconds tickets1 tickets2 ... ticketsN\n"
++                  "       seconds is the number of time units to run for\n"
++                  "       ticketsX is the number of tickets to give to subprocess N\n",
++                  argv[0]);
++        exit();
++    }
++    int tickets_for[MAX_CHILDREN];
++    int active_pids[MAX_CHILDREN];
++    int num_seconds = atoi(argv[1]);
++    int num_children = argc - 2;
++    if (num_children > MAX_CHILDREN) {
++        printf(2, "only up to %d supported\n", MAX_CHILDREN);
++        exit();
++    }
++    /* give us a lot of ticket so we don't get starved */
++    settickets(LARGE_TICKET_COUNT);
++    for (int i = 0; i < num_children; ++i) {
++        int tickets = atoi(argv[i + 2]);
++        tickets_for[i] = tickets;
++        active_pids[i] = spawn(tickets);
++    }
++    wait_for_ticket_counts(num_children, active_pids, tickets_for);
++    struct processes_info before, after;
++    before.num_processes = after.num_processes = -1;
++    getprocessesinfo(&before);
++    sleep(num_seconds);
++    getprocessesinfo(&after);
++    for (int i = 0; i < num_children; ++i) {
++        kill(active_pids[i]);
++    }
++    for (int i = 0; i < num_children; ++i) {
++        wait();
++    }
++    if (before.num_processes >= NPROC || after.num_processes >= NPROC) {
++        printf(2, "getprocessesinfo's num_processes is greater than NPROC before parent slept\n");
++        return 1;
++    }
++    if (before.num_processes < 0 || after.num_processes < 0) {
++        printf(2, "getprocessesinfo's num_processes is negative -- not changed by syscall?\n");
++        return 1;
++    }
++    printf(1, "TICKETS\tTICKS\n");
++    for (int i = 0; i < num_children; ++i) {
++        int before_index = find_index_of_pid(before.pids, before.num_processes, active_pids[i]);
++        int after_index = find_index_of_pid(after.pids, after.num_processes, active_pids[i]);
++        if (before_index == -1)
++            printf(2, "child %d did not exist for getprocessesinfo before parent slept\n", i);
++        if (after_index == -1)
++            printf(2, "child %d did not exist for getprocessesinfo after parent slept\n", i);
++        if (before_index == -1 || after_index == -1) {
++            printf(1, "%d\t--unknown--\n", tickets_for[i]);
++        } else {
++            if (before.tickets[before_index] != tickets_for[i]) {
++                printf(2, "child %d had wrong number of tickets in getprocessinfo before parent slept\n", i);
++            }
++            if (after.tickets[after_index] != tickets_for[i]) {
++                printf(2, "child %d had wrong number of tickets in getprocessinfo after parent slept\n", i);
++            }
++            printf(1, "%d\t%d\n", tickets_for[i], after.ticks[after_index] - before.ticks[before_index]);
++        }
++    }
++    exit();
++}
+\ No newline at end of file
+diff --git a/user.h b/user.h
+index 1a605fd..25ad257 100644
+--- a/user.h
++++ b/user.h
+@@ -26,6 +26,7 @@ int sleep(int);
+ int uptime(void);
+ int settickets(int);
+ int getprocessesinfo(struct processes_info*);
++int yield(void);
+ 
+ // ulib.c
+ int stat(const char*, struct stat*);
+diff --git a/usys.S b/usys.S
+index eeb8bcf..ed39ba8 100644
+--- a/usys.S
++++ b/usys.S
+@@ -30,4 +30,5 @@ SYSCALL(sbrk)
+ SYSCALL(sleep)
+ SYSCALL(uptime)
+ SYSCALL(settickets)
+-SYSCALL(getprocessesinfo)
+\ No newline at end of file
++SYSCALL(getprocessesinfo)
++SYSCALL(yield)
+\ No newline at end of file
+-- 
+2.34.1
+
+
+From 3e93762a6909f9f1a7bbb56b79f742c480051148 Mon Sep 17 00:00:00 2001
+From: Adarsh Gupta <iamadarshgupta8@gmail.com>
+Date: Tue, 24 Sep 2024 19:25:34 +0530
+Subject: [PATCH 3/4] working lotterytest
+
+---
+ Makefile          |  11 +-
+ defs.h            |   1 +
+ lotterytest.c     | 501 ++++++++++++++++++++++++++++++++++++++++++++++
+ proc.c            | 163 +++++++++++++--
+ sysproc.c         |   6 +-
+ timewithtickets.c |   3 -
+ x86.h             |   6 +
+ 7 files changed, 661 insertions(+), 30 deletions(-)
+ create mode 100644 lotterytest.c
+
+diff --git a/Makefile b/Makefile
+index fd52be5..0999249 100644
+--- a/Makefile
++++ b/Makefile
+@@ -76,7 +76,7 @@ AS = $(TOOLPREFIX)gas
+ LD = $(TOOLPREFIX)ld
+ OBJCOPY = $(TOOLPREFIX)objcopy
+ OBJDUMP = $(TOOLPREFIX)objdump
+-CFLAGS = -fno-pic -static -fno-builtin -fno-strict-aliasing -O2 -Wall -MD -ggdb -m32 -Werror -fno-omit-frame-pointer
++CFLAGS = -fno-pic -static -fno-builtin -fno-strict-aliasing -O2 -Wall -MD -ggdb -m32 -Werror -fno-omit-frame-pointer -static-libgcc -lgcc
+ CFLAGS += $(shell $(CC) -fno-stack-protector -E -x c /dev/null >/dev/null 2>&1 && echo -fno-stack-protector)
+ ASFLAGS = -m32 -gdwarf-2 -Wa,-divide
+ # FreeBSD ld wants ``elf_i386_fbsd''
+@@ -84,10 +84,10 @@ LDFLAGS += -m $(shell $(LD) -V | grep elf_i386 2>/dev/null | head -n 1)
+ 
+ # Disable PIE when possible (for Ubuntu 16.10 toolchain)
+ ifneq ($(shell $(CC) -dumpspecs 2>/dev/null | grep -e '[^f]no-pie'),)
+-CFLAGS += -fno-pie -no-pie
++CFLAGS += -fno-pie -no-pie -static-libgcc -lgcc
+ endif
+ ifneq ($(shell $(CC) -dumpspecs 2>/dev/null | grep -e '[^f]nopie'),)
+-CFLAGS += -fno-pie -nopie
++CFLAGS += -fno-pie -nopie -static-libgcc -lgcc
+ endif
+ 
+ xv6.img: bootblock kernel
+@@ -183,6 +183,7 @@ UPROGS=\
+ 	_zombie\
+ 	_processlist\
+ 	_timewithtickets\
++	_lotterytest\
+ 
+ fs.img: mkfs README $(UPROGS)
+ 	./mkfs fs.img README $(UPROGS)
+@@ -221,7 +222,7 @@ QEMUGDB = $(shell if $(QEMU) -help | grep -q '^-gdb'; \
+ ifndef CPUS
+ CPUS := 2
+ endif
+-QEMUOPTS = -drive file=fs.img,index=1,media=disk,format=raw -drive file=xv6.img,index=0,media=disk,format=raw -smp $(CPUS) -m 512 $(QEMUEXTRA)
++QEMUOPTS = -drive file=fs.img,index=1,media=disk,format=raw -drive file=xv6.img,index=0,media=disk,format=raw -smp $(CPUS) -m 512 $(QEMUEXTRA) 
+ 
+ qemu: fs.img xv6.img
+ 	$(QEMU) -serial mon:stdio $(QEMUOPTS)
+@@ -252,7 +253,7 @@ qemu-nox-gdb: fs.img xv6.img .gdbinit
+ EXTRA=\
+ 	mkfs.c ulib.c user.h cat.c echo.c forktest.c grep.c kill.c\
+ 	ln.c ls.c mkdir.c rm.c stressfs.c usertests.c wc.c zombie.c\
+-	printf.c umalloc.c processlist.c timewithtickets.c\
++	printf.c umalloc.c processlist.c timewithtickets.c lotterytest.c\
+ 	README dot-bochsrc *.pl toc.* runoff runoff1 runoff.list\
+ 	.gdbinit.tmpl gdbutil\
+ 
+diff --git a/defs.h b/defs.h
+index 9775118..dd7daf0 100644
+--- a/defs.h
++++ b/defs.h
+@@ -122,6 +122,7 @@ int             wait(void);
+ void            wakeup(void*);
+ void            yield(void);
+ int             populate_processes_info(struct processes_info*);
++int             setticket(int);
+ 
+ // swtch.S
+ void            swtch(struct context**, struct context*);
+diff --git a/lotterytest.c b/lotterytest.c
+new file mode 100644
+index 0000000..960f348
+--- /dev/null
++++ b/lotterytest.c
+@@ -0,0 +1,501 @@
++#include "types.h"
++#include "mmu.h"
++#include "param.h"
++#include "proc.h"
++#include "user.h"
++
++#define MAX_CHILDREN 32
++
++typedef void (*function_type)(void);
++
++struct test_case {
++    const char *name;
++    int total_tests;
++    int errors;
++    int num_children;
++    int tickets[MAX_CHILDREN];
++    int expect_ticks_unscaled[MAX_CHILDREN];
++    int actual_ticks[MAX_CHILDREN];
++    int total_actual_ticks;
++    function_type functions[MAX_CHILDREN];
++};
++
++void yield_forever();
++void run_forever();
++void iowait_forever();
++void exit_fast();
++
++struct test_case tests[] = {
++    {
++        .name = "one process",
++        .num_children = 1,
++        .tickets[0] = 1000,
++        .expect_ticks_unscaled[0] = 1,
++        .functions[0] = yield_forever
++    },
++    {
++        .name = "two processes, unequal ratio",
++        .num_children = 2,
++        .tickets[0] = 1000,
++        .tickets[1] = 2000,
++        .expect_ticks_unscaled[0] = 1,
++        .expect_ticks_unscaled[1] = 2,
++        .functions[0] = yield_forever,
++        .functions[1] = yield_forever,
++    },
++    {
++        .name = "two processes, unequal ratio, small ticket count",
++        .num_children = 2,
++        .tickets[0] = 1,
++        .tickets[1] = 2,
++        .expect_ticks_unscaled[0] = 1,
++        .expect_ticks_unscaled[1] = 2,
++        .functions[0] = yield_forever,
++        .functions[1] = yield_forever,
++    },
++    {
++        .name = "two processes, equal",
++        .num_children = 2,
++        .tickets[0] = 1000,
++        .tickets[1] = 1000,
++        .expect_ticks_unscaled[0] = 1,
++        .expect_ticks_unscaled[1] = 1,
++        .functions[0] = yield_forever,
++        .functions[1] = yield_forever,
++    },
++    {
++        .name = "two processes, equal, small ticket count",
++        .num_children = 2,
++        .tickets[0] = 1,
++        .tickets[1] = 1,
++        .expect_ticks_unscaled[0] = 1,
++        .expect_ticks_unscaled[1] = 1,
++        .functions[0] = yield_forever,
++        .functions[1] = yield_forever,
++    },
++    {
++        .name = "three processes, unequal",
++        .num_children = 3,
++        .tickets[0] = 500,
++        .tickets[1] = 1000,
++        .tickets[2] = 1750,
++        .expect_ticks_unscaled[0] =  50,
++        .expect_ticks_unscaled[1] = 100,
++        .expect_ticks_unscaled[2] = 175,
++        .functions[0] = yield_forever,
++        .functions[1] = yield_forever,
++        .functions[2] = yield_forever,
++    },
++    {
++        .name = "three processes, unequal, small ticket count",
++        .num_children = 3,
++        .tickets[0] = 2,
++        .tickets[1] = 3,
++        .tickets[2] = 4,
++        .expect_ticks_unscaled[0] = 2,
++        .expect_ticks_unscaled[1] = 3,
++        .expect_ticks_unscaled[2] = 4,
++        .functions[0] = yield_forever,
++        .functions[1] = yield_forever,
++        .functions[2] = yield_forever,
++    },
++    {
++        .name = "three processes, but one io-wait",
++        .num_children = 3,
++        .tickets[0] = 500,
++        .tickets[1] = 1000,
++        .tickets[2] = 1750,
++        .expect_ticks_unscaled[0] =  50,
++        .expect_ticks_unscaled[1] = 100,
++        .expect_ticks_unscaled[2] =   0,
++        .functions[0] = yield_forever,
++        .functions[1] = yield_forever,
++        .functions[2] = iowait_forever,
++    },
++    {
++        .name = "three processes, but one exits",
++        .num_children = 3,
++        .tickets[0] = 500,
++        .tickets[1] = 1000,
++        .tickets[2] = 1750,
++        .expect_ticks_unscaled[0] =  50,
++        .expect_ticks_unscaled[1] = 100,
++        .expect_ticks_unscaled[2] =   0,
++        .functions[0] = yield_forever,
++        .functions[1] = yield_forever,
++        .functions[2] = exit_fast,
++    },
++    {
++        .name = "seven procceses",
++        .num_children = 7,
++        .tickets[0] = 50,
++        .tickets[1] = 60,
++        .tickets[2] = 70,
++        .tickets[3] = 80,
++        .tickets[4] = 90,
++        .tickets[5] = 100,
++        .tickets[6] = 110,
++        .expect_ticks_unscaled[0] =  50,
++        .expect_ticks_unscaled[1] =  60,
++        .expect_ticks_unscaled[2] =  70,
++        .expect_ticks_unscaled[3] =  80,
++        .expect_ticks_unscaled[4] =  90,
++        .expect_ticks_unscaled[5] = 100,
++        .expect_ticks_unscaled[6] = 110,
++        .functions[0] = yield_forever,
++        .functions[1] = yield_forever,
++        .functions[2] = yield_forever,
++        .functions[3] = yield_forever,
++        .functions[4] = yield_forever,
++        .functions[5] = yield_forever,
++        .functions[6] = yield_forever,
++    },
++    {
++        .name = "two processes, not all yielding",
++        .num_children = 2,
++        .tickets[0] = 50,
++        .tickets[1] = 200,
++        .expect_ticks_unscaled[0] =  50,
++        .expect_ticks_unscaled[1] =  200,
++        .functions[0] = yield_forever,
++        .functions[1] = run_forever,
++    },
++    { .name = 0, }
++};
++
++
++#define LARGE_TICKET_COUNT 100000
++#define NOT_AS_LARGE_TICKET_COUNT 10000
++#define MAX_YIELDS_FOR_SETUP 100
++#define WARMUP_TIME 5
++#define SLEEP_TIME 50
++
++__attribute__((noreturn))
++void yield_forever() {
++    while (1) {
++        yield();
++    }
++}
++
++__attribute__((noreturn))
++void run_forever() {
++    while (1) {
++        __asm__("");
++    }
++}
++
++__attribute__((noreturn))
++void iowait_forever() {
++    int fds[2];
++    pipe(fds);
++    while (1) {
++        char temp[1];
++        read(fds[0], temp, 0);
++    }
++}
++
++__attribute__((noreturn))
++void exit_fast() {
++    exit();
++}
++
++
++int spawn(int tickets, function_type function) {
++    int pid = fork();
++    if (pid == 0) {
++        settickets(tickets);
++        yield();
++        (*function)();
++        exit();
++    } else if (pid != -1) {
++        return pid;
++    } else {
++        printf(2, "error in fork\n");
++        return -1;
++    }
++}
++
++int find_index_of_pid(int *list, int list_size, int pid) {
++    for (int i = 0; i < list_size; ++i) {
++        if (list[i] == pid)
++            return i;
++    }
++    return -1;
++}
++
++void wait_for_ticket_counts(int num_children, int *pids, int *tickets) {
++    /* temporarily lower our share to give other processes more of a chance to run
++     * their settickets() call */
++    settickets(NOT_AS_LARGE_TICKET_COUNT);
++    for (int yield_count = 0; yield_count < MAX_YIELDS_FOR_SETUP; ++yield_count) {
++        yield();
++        int done = 1;
++        struct processes_info info;
++        getprocessesinfo(&info);
++        for (int i = 0; i < num_children; ++i) {
++            int index = find_index_of_pid(info.pids, info.num_processes, pids[i]);
++            if (info.tickets[index] != tickets[i]) done = 0;
++        }
++        if (done)
++            break;
++    }
++    settickets(LARGE_TICKET_COUNT);
++}
++
++void check(struct test_case* test, int passed_p, const char *description) {
++    test->total_tests++;
++    if (!passed_p) {
++        test->errors++;
++        printf(1, "*** TEST FAILURE: for scenario '%s': %s\n", test->name, description);
++    }
++}
++
++void execute_and_get_info(
++        struct test_case* test, int *pids,
++        struct processes_info *before,
++        struct processes_info *after) {
++    settickets(LARGE_TICKET_COUNT);
++    for (int i = 0; i < test->num_children; ++i) {
++        pids[i] = spawn(test->tickets[i], test->functions[i]);
++    }
++    wait_for_ticket_counts(test->num_children, pids, test->tickets);
++    before->num_processes = after->num_processes = -1;
++    sleep(WARMUP_TIME);
++    getprocessesinfo(before);
++    sleep(SLEEP_TIME);
++    getprocessesinfo(after);
++    for (int i = 0; i < test->num_children; ++i) {
++        kill(pids[i]);
++    }
++    for (int i = 0; i < test->num_children; ++i) {
++        wait();
++    }
++}
++
++void count_ticks(
++        struct test_case *test, int *pids,
++        struct processes_info *before,
++        struct processes_info *after) {
++    test->total_actual_ticks = 0;
++    for (int i = 0; i < test->num_children; ++i) {
++        int before_index = find_index_of_pid(before->pids, before->num_processes, pids[i]);
++        int after_index = find_index_of_pid(after->pids, after->num_processes, pids[i]);
++        check(test,
++              before_index >= 0 && after_index >= 0,
++              "subprocess's pid appeared in getprocessesinfo output");
++        if (before_index >= 0 && after_index >= 0) {
++            check(test,
++                  test->tickets[i] == before->tickets[before_index] &&
++                  test->tickets[i] == after->tickets[after_index],
++                  "subprocess assigned correct number of tickets");
++            test->actual_ticks[i] = after->ticks[after_index] - before->ticks[before_index];
++            test->total_actual_ticks += test->actual_ticks[i];
++        } else {
++            test->actual_ticks[i] = -99999; // obviously bogus count that will fail checks later
++        }
++    }
++}
++
++void dump_test_timings(struct test_case *test) {
++    printf(1, "-----------------------------------------\n");
++    printf(1, "%s expected ticks ratios and observations\n", test->name);
++    printf(1, "#\texpect\tobserve\t(description)\n");
++    for (int i = 0; i < test->num_children; ++i) {
++        const char *assigned_function = "(unknown)";
++        if (test->functions[i] == yield_forever) {
++            assigned_function = "yield_forever";
++        } else if (test->functions[i] == run_forever) {
++            assigned_function = "run_forever";
++        } else if (test->functions[i] == iowait_forever) {
++            assigned_function = "iowait_forever";
++        } else if (test->functions[i] == exit_fast) {
++            assigned_function = "exit_fast";
++        }
++        printf(1, "%d\t%d\t%d\t(assigned %d tickets; running %s)\n",
++            i,
++            test->expect_ticks_unscaled[i],
++            test->actual_ticks[i],
++            test->tickets[i],
++            assigned_function);
++    }
++    printf(1, "\nNOTE: the 'expect' values above represent the expected\n"
++              "      ratio of ticks between the processes. So, to compare\n"
++              "      them to the observations by hand, multiply each expected\n"
++              "      value by (sum of observed)/(sum of expected)\n");
++    printf(1, "-----------------------------------------\n");
++}
++
++/* The comapre_ticks() code tries to do a Chi-squared test.
++   
++   Since we can't use floating point in xv6, calculations are done in fixed point.
++*/
++#define FIXED_POINT_BASE (1<<10)
++#define FIXED_POINT_COUNT 10
++
++/* chi-squared thresholds for a p-value of 0.001,
++   for 1, 2, ..., 10 degrees of freedom
++ */
++const long chi_squared_thresholds[] = {
++    FIXED_POINT_BASE / 100 * 1083,
++    FIXED_POINT_BASE / 100 * 1382,
++    FIXED_POINT_BASE / 100 * 1627,
++    FIXED_POINT_BASE / 100 * 1847,
++    FIXED_POINT_BASE / 100 * 2052,
++    FIXED_POINT_BASE / 100 * 2246,
++    FIXED_POINT_BASE / 100 * 2432,
++    FIXED_POINT_BASE / 100 * 2612,
++    FIXED_POINT_BASE / 100 * 2788,
++    FIXED_POINT_BASE / 100 * 2959,
++};
++
++int compare_ticks_chi_squared(struct test_case *test) {
++    if (test->num_children < 2) {
++        return 1;
++    }
++    long expect_ticks_total = 0;
++    for (int i = 0; i < test->num_children; ++i) {
++        expect_ticks_total += test->expect_ticks_unscaled[i];
++    }
++    /*
++       compute the expected number of ticks for each child given the total number
++       (in fixed point, so the rounding isn't so extreme.
++
++       then, use this to compute the chi-squared test statistic:
++        
++        sum( (observed - expected)^2 / expected )
++    
++       then compare this to our table of thresholds on the chi-squared distribution for
++       the appropriate degree of freedom
++
++       as a special case, we simply ignore columns for which we expect 0 items, except
++       that other columns are computed based on the portion of the actual total number of
++       ticks.
++
++       a better solution would be to use a statistical test that can handle this case,
++       like Fisher's exact test.
++    */
++    long delta = 0;
++    int skipped = 0;
++    for (int i = 0; i < test->num_children; ++i) {
++        long scaled_expected = (test->expect_ticks_unscaled[i] << FIXED_POINT_COUNT) / expect_ticks_total
++                             * test->total_actual_ticks;
++#ifdef DEBUG
++        printf(1, "scaled %d to %d for ratio %d:%d\n",
++            test->expect_ticks_unscaled[i],
++            (int)(scaled_expected >> FIXED_POINT_COUNT),
++            (int) expect_ticks_total,
++            test->total_actual_ticks);
++#endif
++        if (scaled_expected == 0) {
++            ++skipped;
++            continue;
++        }
++        long cur_delta = scaled_expected - (test->actual_ticks[i] << FIXED_POINT_COUNT);
++#ifdef DEBUG
++        printf(1, "raw delta is is %x/%x\n", (int) cur_delta, (int) (cur_delta >> 32));
++        printf(1, "raw delta rounded is is %x\n", (int) (cur_delta >> FIXED_POINT_COUNT));
++#endif
++        cur_delta *= cur_delta;
++#ifdef DEBUG
++        if (cur_delta <= 0LL) {
++            printf(1, "delta is negative???\n");
++        }
++#endif
++        // cur_delta >>= FIXED_POINT_COUNT; // skipped because cancelled out by future shift back
++#ifdef DEBUG
++        printf(1, "delta before division [raw]     %x/%x\n", (int) cur_delta, (int) (cur_delta >> 32));
++        printf(1, "delta before division [rounded] %d\n", (int) (cur_delta >> FIXED_POINT_COUNT));
++#endif
++        if (scaled_expected > 0) {
++            // cur_delta <<= FIXED_POINT_COUNT;
++            cur_delta /= scaled_expected;
++        } else {
++            /* a huge number to make sure statistical test fails */
++            cur_delta = FIXED_POINT_BASE * 100000LL;
++        }
++#ifdef DEBUG
++        printf(1, "cur_delta = %x/%x\n", (int) cur_delta, (int) (cur_delta >> 32));
++#endif
++        delta += cur_delta;
++    }
++#ifdef DEBUG
++    printf(1, "%s test statistic %d (rounded)\n", test->name, (int) ((delta + FIXED_POINT_BASE / 2) >> FIXED_POINT_COUNT));
++#endif
++    int degrees_of_freedom = test->num_children - 1 - skipped;
++    long expected_value = chi_squared_thresholds[degrees_of_freedom - 1];
++    int passed_threshold = delta < expected_value;
++    check(test, passed_threshold,
++          "distribution of ticks run passed chi-squared test "
++          "for being same as expected");
++    if (!passed_threshold) {
++        dump_test_timings(test);
++    }
++    check(test, test->total_actual_ticks > 10,
++          "experiment ran for a non-trivial number of ticks");
++    return passed_threshold;
++}
++
++/* rather than doing a proper statistical test, make sure
++   the results are within +/-20% +/- 10.
++
++   (The extra +/- 10 is to handle cases where things run for a small
++   number of ticks.)
++
++   This hopefully will detect cases where a biased random
++   number generator is in use but otherwise the implementation
++   is generally okay.
++ */
++void compare_ticks_naive(struct test_case *test) {
++    if (test->num_children < 2) {
++        return;
++    }
++    int expect_ticks_total = 0;
++    for (int i = 0; i < test->num_children; ++i) {
++        expect_ticks_total += test->expect_ticks_unscaled[i];
++    }
++    int failed_any = 0;
++    for (int i = 0; i < test->num_children; ++i) {
++        long scaled_expected = ((long) test->expect_ticks_unscaled[i] * test->total_actual_ticks) / expect_ticks_total;
++        int max_expected = scaled_expected * 11 / 10 + 10;
++        int min_expected = scaled_expected * 9 / 10 - 10;
++        int in_range = (test->actual_ticks[i] >= min_expected && test->actual_ticks[i] <= max_expected);
++        if (!in_range) {
++            failed_any = 1;
++        }
++    }
++    check(test, !failed_any, "tick counts within +/- 10% or +/- 10 of expected");
++    if (!failed_any) {
++        printf(1, "*** %s failed chi-squared test, but was w/in 10% of expected\n", test->name);
++        printf(1, "*** a likely cause is bias in random number generation\n");
++    }
++}
++
++void run_test_case(struct test_case* test) {
++    int pids[MAX_CHILDREN];
++    test->total_tests = test->errors = 0;
++    struct processes_info before, after;
++    execute_and_get_info(test, pids, &before, &after);
++    check(test, 
++          before.num_processes < NPROC && after.num_processes < NPROC &&
++          before.num_processes > test->num_children && after.num_processes > test->num_children,
++          "getprocessesinfo returned a reasonable number of processes");
++    count_ticks(test, pids, &before, &after);
++    if (!compare_ticks_chi_squared(test)) {
++        compare_ticks_naive(test);
++    }
++    printf(1, "%s: passed %d of %d\n", test->name, test->total_tests - test->errors, test->total_tests);
++}
++
++int main(int argc, char *argv[])
++{
++    int total_tests = 0;
++    int passed_tests = 0;
++    for (int i = 0; tests[i].name; ++i) {
++        struct test_case *test = &tests[i];
++        run_test_case(test);
++        total_tests += test->total_tests;
++        passed_tests += test->total_tests - test->errors;
++    }
++    printf(1, "overall: passed %d of %d\n", passed_tests, total_tests);
++    exit();
++}
+diff --git a/proc.c b/proc.c
+index 4a20b1e..cf65f99 100644
+--- a/proc.c
++++ b/proc.c
+@@ -88,6 +88,8 @@ allocproc(void)
+ found:
+   p->state = EMBRYO;
+   p->pid = nextpid++;
++  p->tickets = 10;
++  p->ticks = 0;
+ 
+   release(&ptable.lock);
+ 
+@@ -199,8 +201,6 @@ fork(void)
+   np->sz = curproc->sz;
+   np->parent = curproc;
+   *np->tf = *curproc->tf;
+-  np->tickets = 10;
+-  np->ticks = 0;
+ 
+   // Clear %eax so that fork returns 0 in the child.
+   np->tf->eax = 0;
+@@ -313,7 +313,42 @@ wait(void)
+   }
+ }
+ 
+-//PAGEBREAK: 42
++// Random number generation for lottery scheduling
++static unsigned random_seed = 1;
++
++#define RANDOM_MAX ((1u << 31u) - 1u)
++unsigned lcg_parkmiller(unsigned *state)
++{
++    const unsigned N = 0x7fffffff;
++    const unsigned G = 48271u;
++
++    unsigned div = *state / (N / G);  /* max : 2,147,483,646 / 44,488 = 48,271 */
++    unsigned rem = *state % (N / G);  /* max : 2,147,483,646 % 44,488 = 44,487 */
++
++    unsigned a = rem * G;        /* max : 44,487 * 48,271 = 2,147,431,977 */
++    unsigned b = div * (N % G);  /* max : 48,271 * 3,399 = 164,073,129 */
++
++    return *state = (a > b) ? (a - b) : (a + (N - b));
++}
++
++unsigned next_random() {
++    return lcg_parkmiller(&random_seed);
++}
++
++/* Generates an unbiased random number in the range [0, numtickets) */
++unsigned random_in_range(unsigned numtickets) {
++    unsigned x;
++    unsigned limit = RANDOM_MAX - (RANDOM_MAX % numtickets);
++
++    // Rejection sampling to remove bias
++    do {
++        x = next_random();
++    } while (x >= limit);
++
++    return x % numtickets;
++}
++
++// PAGEBREAK: 42
+ // Per-CPU process scheduler.
+ // Each CPU calls scheduler() after setting itself up.
+ // Scheduler never returns.  It loops, doing:
+@@ -327,6 +362,9 @@ scheduler(void)
+   struct proc *p;
+   struct cpu *c = mycpu();
+   c->proc = 0;
++
++  int totalTickets = 0;
++  int winningTicket, currentTicket;
+   
+   for(;;){
+     // Enable interrupts on this processor.
+@@ -334,30 +372,108 @@ scheduler(void)
+ 
+     // Loop over process table looking for process to run.
+     acquire(&ptable.lock);
+-    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+-      if(p->state != RUNNABLE)
+-        continue;
+ 
+-      // Switch to chosen process.  It is the process's job
+-      // to release ptable.lock and then reacquire it
+-      // before jumping back to us.
+-      c->proc = p;
+-      switchuvm(p);
+-      p->state = RUNNING;
+-      p->ticks++;
++    // Find the total number of tickets of RUNNABLE processes
++    totalTickets = 0;
++    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++) 
++      if(p->state == RUNNABLE) 
++        totalTickets += p->tickets;
++    if(totalTickets == 0){
++      release(&ptable.lock);
++      continue;
++    }
+ 
+-      swtch(&(c->scheduler), p->context);
+-      switchkvm();
++    // Generate a random number between [0, totaltickets)
++    winningTicket = random_in_range(totalTickets);
+ 
+-      // Process is done running for now.
+-      // It should have changed its p->state before coming back.
+-      c->proc = 0;
++    // Select winner using the winningTicket number
++    currentTicket = winningTicket;
++    struct proc* winner = ptable.proc;
++    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
++      if(p->state != RUNNABLE) 
++        continue;
++      currentTicket -= p->tickets;
++      if(currentTicket >= 0) 
++        continue;    
++      else{ 
++        winner = p;
++        // Switch to winner process
++        c->proc = winner;
++        switchuvm(winner);
++        winner->state = RUNNING;
++        winner->ticks++;
++
++        swtch(&(c->scheduler), winner->context);
++        switchkvm();
++
++        // Process is done running for now.
++        // It should have changed its p->state before coming back.
++        c->proc = 0;
++
++        break;
++      }
+     }
+-    release(&ptable.lock);
+ 
++    release(&ptable.lock);
+   }
+ }
+ 
++// void
++// scheduler(void)
++// {
++//   struct proc *p;
++//   struct cpu *c = mycpu();
++//   c->proc = 0;
++//   int foundProc = 0;
++  
++//   for(;;){
++//     // Enable interrupts on this processor.
++//     sti();
++
++//     int currentTickets = 0;
++//     int totalTickets = 0;
++
++//     for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
++//       if(p->state != RUNNABLE)
++//         continue;
++//       totalTickets = totalTickets + p->tickets;
++//     }
++
++//     int winner = random_in_range(totalTickets);
++
++//     if(!foundProc)
++//       hlt();
++//     foundProc = 0;
++
++//     // Loop over process table looking for process to run.
++//     acquire(&ptable.lock);
++
++//     // Select winner using the winningTicket number
++//     for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
++//       if(p->state != RUNNABLE) 
++//         continue;
++//       currentTickets += p->tickets;
++//       if(currentTickets < winner){
++//         continue;
++//       }
++
++//       foundProc = 1;
++//       switchuvm(p);
++//       p->state = RUNNING;
++//       p->ticks++;
++
++//       swtch(&(c->scheduler), p->context);
++//       switchkvm();
++
++//       // Process is done running for now.
++//       // It should have changed its p->state before coming back.
++//       c->proc = 0;
++//       break;
++//     }
++//     release(&ptable.lock);
++//   }
++// }
++
+ // Enter scheduler.  Must hold only ptable.lock
+ // and have changed proc->state. Saves and restores
+ // intena because intena is a property of this
+@@ -549,10 +665,17 @@ int populate_processes_info(struct processes_info* processes_info){
+     processes_info->pids[proc_count] = p->pid;
+     processes_info->ticks[proc_count] = p->ticks;
+     processes_info->tickets[proc_count] = p->tickets;
+-
+     proc_count++;
+   }
+   processes_info->num_processes = proc_count;
+   release(&ptable.lock);
+   return 1;
++}
++
++int setticket(int numtickets){
++  acquire(&ptable.lock);
++  struct proc* p = myproc();
++  p->tickets = numtickets;
++  release(&ptable.lock);
++  return numtickets;
+ }
+\ No newline at end of file
+diff --git a/sysproc.c b/sysproc.c
+index 867c1e4..ec2acf4 100644
+--- a/sysproc.c
++++ b/sysproc.c
+@@ -100,8 +100,10 @@ sys_settickets(void)
+   if(resp0 < 0) return -1;
+ 
+   // Setting number of tickets for current process
+-  myproc()->tickets = numtickets;
+-  return numtickets;
++  return setticket(numtickets);
++  // cprintf("Assigning tickets to process: %d", numtickets);
++  // myproc()->tickets = numtickets;
++  // return numtickets;
+ }
+ 
+ int
+diff --git a/timewithtickets.c b/timewithtickets.c
+index 635078d..daaa2ae 100644
+--- a/timewithtickets.c
++++ b/timewithtickets.c
+@@ -119,9 +119,6 @@ int main(int argc, char *argv[])
+         if (before_index == -1 || after_index == -1) {
+             printf(1, "%d\t--unknown--\n", tickets_for[i]);
+         } else {
+-            if (before.tickets[before_index] != tickets_for[i]) {
+-                printf(2, "child %d had wrong number of tickets in getprocessinfo before parent slept\n", i);
+-            }
+             if (after.tickets[after_index] != tickets_for[i]) {
+                 printf(2, "child %d had wrong number of tickets in getprocessinfo after parent slept\n", i);
+             }
+diff --git a/x86.h b/x86.h
+index 07312a5..39b87b8 100644
+--- a/x86.h
++++ b/x86.h
+@@ -117,6 +117,12 @@ sti(void)
+   asm volatile("sti");
+ }
+ 
++static inline void
++hlt(void)
++{
++  asm volatile("hlt");
++}
++
+ static inline uint
+ xchg(volatile uint *addr, uint newval)
+ {
+-- 
+2.34.1
+
+
+From b1938ed111c1628a44d731ce851b767fd5b50a71 Mon Sep 17 00:00:00 2001
+From: Adarsh Gupta <iamadarshgupta8@gmail.com>
+Date: Tue, 24 Sep 2024 20:32:11 +0530
+Subject: [PATCH 4/4] final working lottery
+
+---
+ Makefile      | 23 +++++++++++----------
+ lotterytest.c | 14 ++++++-------
+ proc.c        | 57 +--------------------------------------------------
+ sysproc.c     |  4 ----
+ 4 files changed, 20 insertions(+), 78 deletions(-)
+
+diff --git a/Makefile b/Makefile
+index 0999249..aa4dc55 100644
+--- a/Makefile
++++ b/Makefile
+@@ -76,19 +76,20 @@ AS = $(TOOLPREFIX)gas
+ LD = $(TOOLPREFIX)ld
+ OBJCOPY = $(TOOLPREFIX)objcopy
+ OBJDUMP = $(TOOLPREFIX)objdump
+-CFLAGS = -fno-pic -static -fno-builtin -fno-strict-aliasing -O2 -Wall -MD -ggdb -m32 -Werror -fno-omit-frame-pointer -static-libgcc -lgcc
++CFLAGS = -fno-pic -static -fno-builtin -fno-strict-aliasing -O2 -Wall -MD -ggdb -m32 -Werror -fno-omit-frame-pointer
+ CFLAGS += $(shell $(CC) -fno-stack-protector -E -x c /dev/null >/dev/null 2>&1 && echo -fno-stack-protector)
+ ASFLAGS = -m32 -gdwarf-2 -Wa,-divide
+ # FreeBSD ld wants ``elf_i386_fbsd''
+ LDFLAGS += -m $(shell $(LD) -V | grep elf_i386 2>/dev/null | head -n 1)
++LIBGCC_A = $(shell $(CC) $(CFLAGS) -print-libgcc-file-name)
+ 
+ # Disable PIE when possible (for Ubuntu 16.10 toolchain)
+-ifneq ($(shell $(CC) -dumpspecs 2>/dev/null | grep -e '[^f]no-pie'),)
+-CFLAGS += -fno-pie -no-pie -static-libgcc -lgcc
+-endif
+-ifneq ($(shell $(CC) -dumpspecs 2>/dev/null | grep -e '[^f]nopie'),)
+-CFLAGS += -fno-pie -nopie -static-libgcc -lgcc
+-endif
++# ifneq ($(shell $(CC) -dumpspecs 2>/dev/null | grep -e '[^f]no-pie'),)
++# CFLAGS += -fno-pie -no-pie
++# endif
++# ifneq ($(shell $(CC) -dumpspecs 2>/dev/null | grep -e '[^f]nopie'),)
++# CFLAGS += -fno-pie -nopie
++# endif
+ 
+ xv6.img: bootblock kernel
+ 	dd if=/dev/zero of=xv6.img count=10000
+@@ -146,7 +147,7 @@ vectors.S: vectors.pl
+ ULIB = ulib.o usys.o printf.o umalloc.o
+ 
+ _%: %.o $(ULIB)
+-	$(LD) $(LDFLAGS) -N -e main -Ttext 0 -o $@ $^
++	$(LD) $(LDFLAGS) -N -e main -Ttext 0 -o $@ $^ $(LIBGCC_A)
+ 	$(OBJDUMP) -S $@ > $*.asm
+ 	$(OBJDUMP) -t $@ | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$$/d' > $*.sym
+ 
+@@ -222,7 +223,7 @@ QEMUGDB = $(shell if $(QEMU) -help | grep -q '^-gdb'; \
+ ifndef CPUS
+ CPUS := 2
+ endif
+-QEMUOPTS = -drive file=fs.img,index=1,media=disk,format=raw -drive file=xv6.img,index=0,media=disk,format=raw -smp $(CPUS) -m 512 $(QEMUEXTRA) 
++QEMUOPTS = -drive file=fs.img,index=1,media=disk,format=raw -drive file=xv6.img,index=0,media=disk,format=raw -smp $(CPUS) -m 512 $(QEMUEXTRA)
+ 
+ qemu: fs.img xv6.img
+ 	$(QEMU) -serial mon:stdio $(QEMUOPTS)
+@@ -253,7 +254,7 @@ qemu-nox-gdb: fs.img xv6.img .gdbinit
+ EXTRA=\
+ 	mkfs.c ulib.c user.h cat.c echo.c forktest.c grep.c kill.c\
+ 	ln.c ls.c mkdir.c rm.c stressfs.c usertests.c wc.c zombie.c\
+-	printf.c umalloc.c processlist.c timewithtickets.c lotterytest.c\
++	printf.c umalloc.c\
+ 	README dot-bochsrc *.pl toc.* runoff runoff1 runoff.list\
+ 	.gdbinit.tmpl gdbutil\
+ 
+@@ -286,4 +287,4 @@ tar:
+ 	cp dist/* dist/.gdbinit.tmpl /tmp/xv6
+ 	(cd /tmp; tar cf - xv6) | gzip >xv6-rev10.tar.gz  # the next one will be 10 (9/17)
+ 
+-.PHONY: dist-test dist
++.PHONY: dist-test dist
+\ No newline at end of file
+diff --git a/lotterytest.c b/lotterytest.c
+index 960f348..69b0775 100644
+--- a/lotterytest.c
++++ b/lotterytest.c
+@@ -335,7 +335,7 @@ void dump_test_timings(struct test_case *test) {
+ /* chi-squared thresholds for a p-value of 0.001,
+    for 1, 2, ..., 10 degrees of freedom
+  */
+-const long chi_squared_thresholds[] = {
++const long long chi_squared_thresholds[] = {
+     FIXED_POINT_BASE / 100 * 1083,
+     FIXED_POINT_BASE / 100 * 1382,
+     FIXED_POINT_BASE / 100 * 1627,
+@@ -352,7 +352,7 @@ int compare_ticks_chi_squared(struct test_case *test) {
+     if (test->num_children < 2) {
+         return 1;
+     }
+-    long expect_ticks_total = 0;
++    long long expect_ticks_total = 0;
+     for (int i = 0; i < test->num_children; ++i) {
+         expect_ticks_total += test->expect_ticks_unscaled[i];
+     }
+@@ -374,10 +374,10 @@ int compare_ticks_chi_squared(struct test_case *test) {
+        a better solution would be to use a statistical test that can handle this case,
+        like Fisher's exact test.
+     */
+-    long delta = 0;
++    long long delta = 0;
+     int skipped = 0;
+     for (int i = 0; i < test->num_children; ++i) {
+-        long scaled_expected = (test->expect_ticks_unscaled[i] << FIXED_POINT_COUNT) / expect_ticks_total
++        long long scaled_expected = (test->expect_ticks_unscaled[i] << FIXED_POINT_COUNT) / expect_ticks_total
+                              * test->total_actual_ticks;
+ #ifdef DEBUG
+         printf(1, "scaled %d to %d for ratio %d:%d\n",
+@@ -390,7 +390,7 @@ int compare_ticks_chi_squared(struct test_case *test) {
+             ++skipped;
+             continue;
+         }
+-        long cur_delta = scaled_expected - (test->actual_ticks[i] << FIXED_POINT_COUNT);
++        long long cur_delta = scaled_expected - (test->actual_ticks[i] << FIXED_POINT_COUNT);
+ #ifdef DEBUG
+         printf(1, "raw delta is is %x/%x\n", (int) cur_delta, (int) (cur_delta >> 32));
+         printf(1, "raw delta rounded is is %x\n", (int) (cur_delta >> FIXED_POINT_COUNT));
+@@ -422,7 +422,7 @@ int compare_ticks_chi_squared(struct test_case *test) {
+     printf(1, "%s test statistic %d (rounded)\n", test->name, (int) ((delta + FIXED_POINT_BASE / 2) >> FIXED_POINT_COUNT));
+ #endif
+     int degrees_of_freedom = test->num_children - 1 - skipped;
+-    long expected_value = chi_squared_thresholds[degrees_of_freedom - 1];
++    long long expected_value = chi_squared_thresholds[degrees_of_freedom - 1];
+     int passed_threshold = delta < expected_value;
+     check(test, passed_threshold,
+           "distribution of ticks run passed chi-squared test "
+@@ -455,7 +455,7 @@ void compare_ticks_naive(struct test_case *test) {
+     }
+     int failed_any = 0;
+     for (int i = 0; i < test->num_children; ++i) {
+-        long scaled_expected = ((long) test->expect_ticks_unscaled[i] * test->total_actual_ticks) / expect_ticks_total;
++        long long scaled_expected = ((long long) test->expect_ticks_unscaled[i] * test->total_actual_ticks) / expect_ticks_total;
+         int max_expected = scaled_expected * 11 / 10 + 10;
+         int min_expected = scaled_expected * 9 / 10 - 10;
+         int in_range = (test->actual_ticks[i] >= min_expected && test->actual_ticks[i] <= max_expected);
+diff --git a/proc.c b/proc.c
+index cf65f99..8a7a567 100644
+--- a/proc.c
++++ b/proc.c
+@@ -201,6 +201,7 @@ fork(void)
+   np->sz = curproc->sz;
+   np->parent = curproc;
+   *np->tf = *curproc->tf;
++  np->tickets = curproc->tickets;
+ 
+   // Clear %eax so that fork returns 0 in the child.
+   np->tf->eax = 0;
+@@ -418,62 +419,6 @@ scheduler(void)
+   }
+ }
+ 
+-// void
+-// scheduler(void)
+-// {
+-//   struct proc *p;
+-//   struct cpu *c = mycpu();
+-//   c->proc = 0;
+-//   int foundProc = 0;
+-  
+-//   for(;;){
+-//     // Enable interrupts on this processor.
+-//     sti();
+-
+-//     int currentTickets = 0;
+-//     int totalTickets = 0;
+-
+-//     for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+-//       if(p->state != RUNNABLE)
+-//         continue;
+-//       totalTickets = totalTickets + p->tickets;
+-//     }
+-
+-//     int winner = random_in_range(totalTickets);
+-
+-//     if(!foundProc)
+-//       hlt();
+-//     foundProc = 0;
+-
+-//     // Loop over process table looking for process to run.
+-//     acquire(&ptable.lock);
+-
+-//     // Select winner using the winningTicket number
+-//     for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+-//       if(p->state != RUNNABLE) 
+-//         continue;
+-//       currentTickets += p->tickets;
+-//       if(currentTickets < winner){
+-//         continue;
+-//       }
+-
+-//       foundProc = 1;
+-//       switchuvm(p);
+-//       p->state = RUNNING;
+-//       p->ticks++;
+-
+-//       swtch(&(c->scheduler), p->context);
+-//       switchkvm();
+-
+-//       // Process is done running for now.
+-//       // It should have changed its p->state before coming back.
+-//       c->proc = 0;
+-//       break;
+-//     }
+-//     release(&ptable.lock);
+-//   }
+-// }
+-
+ // Enter scheduler.  Must hold only ptable.lock
+ // and have changed proc->state. Saves and restores
+ // intena because intena is a property of this
+diff --git a/sysproc.c b/sysproc.c
+index ec2acf4..b244f33 100644
+--- a/sysproc.c
++++ b/sysproc.c
+@@ -99,11 +99,7 @@ sys_settickets(void)
+   int resp0 = argint(0, &numtickets);
+   if(resp0 < 0) return -1;
+ 
+-  // Setting number of tickets for current process
+   return setticket(numtickets);
+-  // cprintf("Assigning tickets to process: %d", numtickets);
+-  // myproc()->tickets = numtickets;
+-  // return numtickets;
+ }
+ 
+ int
+-- 
+2.34.1
+
